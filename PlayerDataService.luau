@@ -1,13 +1,12 @@
 local Players = game:GetService("Players")
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ServerScriptService = game:GetService("ServerScriptService")
 
---local MonetizationStoreDataTemplate = require(ServerScriptService.Server.Data.MonetizationStoreDataTemplate)
+local MonetizationStoreDataTemplate = require(ServerScriptService.Server.Data.MonetizationStoreDataTemplate)
 local PlayerDataTemplate = require(ServerScriptService.Server.Data.PlayerDataTemplate)
 
 local ProfileStore = require(ServerScriptService.ServerPackages.ProfileStore)
-local GoodSignal = require(ReplicatedStorage.Packages.GoodSignal)
 
+local KICK_ON_ERROR = true
 local DEV_MODE = false
 
 type DataKey = string | number
@@ -22,32 +21,34 @@ export type PlayerInfo = Player | string
 
 export type ScopeControl = {
 	Set: (self: ScopeControl, dataKey: DataKey?, value: AllowedValue) -> AllowedValue,
-	Get: (self: ScopeControl, dataPath: DataPath?) -> AllowedValue?,
+	Get: (self: ScopeControl, dataPath: DataPath) -> AllowedValue?,
+	Clear: (self: ScopeControl) -> nil,
 	Remove: (self: ScopeControl) -> nil,
 }
 
-local PlayerDataService = {
-	PlayerDataLoaded = GoodSignal.new()
-}
+local PlayerDataService = {}
 type PlayerDataService = typeof(PlayerDataService)
 
 function PlayerDataService.Init(self: PlayerDataService)
 	self.PlayerProfileStore = ProfileStore.New("PlayerProfiles", PlayerDataTemplate)
-	--self.MonetizationProfileStore = ProfileStore.New("MonetizationStore", MonetizationStoreDataTemplate)
+	self.MonetizationProfileStore = ProfileStore.New("MonetizationStore", MonetizationStoreDataTemplate)
 
 	self.Profiles = {}
 	--self.SaveQueue = {}
 
-	Players.PlayerAdded:Connect(function(player: Player)
-		self:CreateProfile(player, function()
-			player:Kick("Error occured while trying to load your data. Please rejoin the game")
-		end)
-		self.PlayerDataLoaded:Fire(player)
-	end)
-
 	if DEV_MODE then
 		self.PlayerProfileStore = self.PlayerProfileStore.Mock
 	end
+end
+
+function PlayerDataService.Start(self: PlayerDataService)
+	Players.PlayerAdded:Connect(function(player: Player)
+		self:CreateProfile(player, function()
+			if KICK_ON_ERROR then
+				player:Kick("[DATA ERROR] Your data wasn't loaded properly. Please report this error to the developer")
+			end
+		end)
+	end)
 end
 
 local function getPlayerUserId(player: PlayerInfo): number?
@@ -63,12 +64,10 @@ local function getPlayerUserId(player: PlayerInfo): number?
 end
 
 local function convertInTable(value)
-	return {value}
+	return { value }
 end
 
-local function checkValueType(value: any)
-	print(value)
-	
+local function isValidType(value: any)
 	if type(value) == "string" then
 		return true
 	end
@@ -83,30 +82,19 @@ local function checkValueType(value: any)
 
 	if type(value) == "table" then
 		for k, v in pairs(value) do
-			if not checkValueType(k) then
+			if not isValidType(k) then
 				return false
 			end
 
-			if not checkValueType(v) then
+			if not isValidType(v) then
 				return false
 			end
 		end
-		
+
 		return true
 	end
 
 	return false
-end
-
-function PlayerDataService.Start(self: PlayerDataService)
-	for _, player in Players:GetPlayers() do
-		if not self:HasProfile(player) then
-			self:CreateProfile(player, function()
-				player:Kick("Error occured while trying to load your data. Please rejoin the game")
-			end)
-			self.PlayerDataLoaded:Fire(player)
-		end
-	end
 end
 
 function PlayerDataService.CreateProfile(self: PlayerDataService, player: PlayerInfo, onError: () -> ...any)
@@ -183,7 +171,7 @@ function PlayerDataService.WaitForProfile(self: PlayerDataService, player: Playe
 	if not playerUserId then
 		return
 	end
-	
+
 	repeat
 		task.wait(0.01)
 	until self.Profiles[playerUserId] ~= nil
@@ -200,11 +188,7 @@ function PlayerDataService.SavePlayer(self: PlayerDataService, player: PlayerInf
 	end
 end
 
-function PlayerDataService.CreateScope(
-	self: PlayerDataService,
-	player: PlayerInfo,
-	scopeName: string
-): ScopeControl?
+function PlayerDataService.CreateScope(self: PlayerDataService, player: PlayerInfo, scopeName: string): ScopeControl?
 	local playerUserId = getPlayerUserId(player)
 	if not playerUserId then
 		return
@@ -237,17 +221,16 @@ function PlayerDataService.GetScope(self: PlayerDataService, player: PlayerInfo,
 	end
 
 	local profileData = playerProfile.Data
-	
 	if not profileData[scopeName] then
 		return
 	end
-	
+
 	return table.freeze({
 		Set = function(_, dataKey: DataKey?, value: AllowedValue): AllowedValue?
-			print(dataKey, value)
-			assert(checkValueType(value), `Provided value has unallowed type or includes objects with unallowed types`)
-			
-			if dataKey then
+			assert(isValidType(value), `Provided value has unallowed type or includes objects with unallowed types`)
+
+			if dataKey ~= nil then
+				assert(isValidType(dataKey), `Provided data key has unallowed type`)
 				profileData[scopeName][dataKey] = value
 			else
 				table.insert(profileData[scopeName], value)
@@ -256,10 +239,10 @@ function PlayerDataService.GetScope(self: PlayerDataService, player: PlayerInfo,
 			return value
 		end,
 		Get = function(_, dataPath: DataPath?, default: any)
-			if type(dataPath) ~= "table" and dataPath == nil then
-				return profileData[scopeName] or default
-			elseif type(dataPath) ~= nil then
+			if dataPath ~= nil and type(dataPath) ~= "table" then
 				dataPath = convertInTable(dataPath)
+			else
+				return profileData[scopeName] or default
 			end
 
 			local currentData = profileData[scopeName]
@@ -283,22 +266,13 @@ function PlayerDataService.GetScope(self: PlayerDataService, player: PlayerInfo,
 
 			return currentData
 		end,
+		Clear = function(_)
+			profileData[scopeName] = {}
+		end,
 		Remove = function(_)
 			profileData[scopeName] = nil
 		end,
-	})
-end
-
-function PlayerDataService.GetPlayersWithProfile(self: PlayerDataService): {Player}
-	local players = {}
-	for playerUserId, profile in self.Profiles do
-		local player = Players:GetPlayerByUserId(playerUserId)
-		if player then
-			table.insert(players, player)
-		end
-	end
-
-	return players
+	} :: ScopeControl)
 end
 
 --[[function PlayerDataService.SetPlayerDataInScope(
