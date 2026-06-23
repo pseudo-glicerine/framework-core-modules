@@ -10,3 +10,6 @@ Provides utility functions for easier player management
 
 ### PlayerDataService
 Handles loading and saving player data using the ProfileStore module
+
+### EventBus
+
